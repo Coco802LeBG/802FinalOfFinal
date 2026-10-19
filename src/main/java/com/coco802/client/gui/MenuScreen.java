@@ -60,6 +60,12 @@ public final class MenuScreen extends Screen {
     private Hit dragging;
     private boolean wasDown;
     private float alpha = 1f;
+    private int scroll;
+    private int maxScroll;
+    private int endY;
+    private int contentStart;
+    private int clipTop, clipBottom;
+    private String scrollKey = "";
 
     public MenuScreen(Screen parent) {
         super(Text.literal("802 Client"));
@@ -161,22 +167,50 @@ public final class MenuScreen extends Screen {
         sidebar(ctx, mx, my, x0, y0, pw, ph);
         topbar(ctx, mx, my, x0, y0, pw);
 
-        int x1 = x0 + 102, x2 = x0 + pw - 12, y1 = y0 + 50;
-        if (detail != null) detailPage(ctx, x1, x2, y1);
-        else if (page == 0) modulesPage(ctx, mx, my, x1, x2, y1);
-        else if (page == 1) settingsPage(ctx, x1, x2, y1);
-        else if (page == 2) modsPage(ctx, x1, x2, y1);
-        else profilesPage(ctx, mx, my, x1, x2, y1);
+        int x1 = x0 + 102, x2 = x0 + pw - 18, y1 = y0 + 50;
+        String key = page + "|" + (detail == null ? "" : detail.name) + "|" + filter + "|" + query;
+        if (!key.equals(scrollKey)) { scrollKey = key; scroll = 0; }
+        boolean scrolls = detail != null || page != 2;
+        clipTop = y0 + 44;
+        clipBottom = y0 + ph - 6;
+        contentStart = hits.size();
+        endY = y1;
+        ctx.enableScissor(x0 + 94, clipTop, x0 + pw - 2, clipBottom);
+        int sy = scrolls ? y1 - scroll : y1;
+        if (detail != null) detailPage(ctx, x1, x2, sy);
+        else if (page == 0) modulesPage(ctx, mx, my, x1, x2, sy);
+        else if (page == 1) settingsPage(ctx, x1, x2, sy);
+        else if (page == 2) modsPage(ctx, x1, x2, sy);
+        else profilesPage(ctx, mx, my, x1, x2, sy);
 
         servers.visible = detail instanceof CrystalReflexModule;
         modSearch.visible = detail == null && page == 2;
         search.visible = detail == null && page == 0;
+        if (servers.visible) servers.render(ctx, mx, my, delta);
+        if (modSearch.visible) modSearch.render(ctx, mx, my, delta);
+        ctx.disableScissor();
+
+        if (scrolls) {
+            int viewH = clipBottom - y1;
+            int contentH = Math.max(0, endY + scroll - y1);
+            maxScroll = Math.max(0, contentH - viewH + 6);
+            scroll = Math.max(0, Math.min(maxScroll, scroll));
+            if (maxScroll > 0) {
+                int trackX = x0 + pw - 10;
+                rect(ctx, trackX, y1, trackX + 3, clipBottom, 0xFF1A212B);
+                int barH = Math.max(14, viewH * viewH / (contentH + 6));
+                int barY = y1 + (int) ((long) (viewH - barH) * scroll / maxScroll);
+                rect(ctx, trackX, barY, trackX + 3, barY + barH, ACCENT);
+            }
+        } else {
+            maxScroll = 0;
+            scroll = 0;
+        }
+
         if (search.visible) {
             if (query.isEmpty()) text(ctx, "Search anything...", x0 + 112, y0 + 16, 0xFF6F7F94);
             search.render(ctx, mx, my, delta);
         }
-        if (servers.visible) servers.render(ctx, mx, my, delta);
-        if (modSearch.visible) modSearch.render(ctx, mx, my, delta);
         handleMouse(mx, my);
     }
 
@@ -248,6 +282,7 @@ public final class MenuScreen extends Screen {
             i++;
         }
         if (i == 0) text(c, "Aucun module trouvé.", x1, y1 + 4, 0xFF6F7F94);
+        endY = y1 + ((i + 1) / 2) * (ch + gap);
     }
 
     private void moduleCard(DrawContext c, Module802 m, int x, int y, int w, int h, int mx, int my) {
@@ -277,6 +312,7 @@ public final class MenuScreen extends Screen {
         y = switchRow(c, "Activé", x1, x2, y, m.isEnabled(), () -> { m.toggle(); Client802.saveModules(); });
         y += 4;
         for (Setting s : m.settings) y = settingRow(c, s, x1, x2, y);
+        endY = y;
         if (m instanceof CrystalReflexModule) {
             if (!serversLoaded) {
                 servers.setChangedListener(null);
@@ -297,6 +333,7 @@ public final class MenuScreen extends Screen {
             final int fy = y;
             hits.add(new Hit(x1, fy, x2, fy + 22, v -> this.setFocused(servers), null));
             if (servers.getText().isEmpty()) text(c, "ex: mc.exemple.net, autre.serveur.com", x1 + 10, y + 7, 0xFF55616F);
+            endY = y + 28;
         }
     }
 
@@ -324,6 +361,7 @@ public final class MenuScreen extends Screen {
         y += 22;
         text(c, "Config : .minecraft/config/802client.json", x1, y, 0xFF6F7F94);
         text(c, "Menu : Shift droit (modifiable dans les contrôles)", x1, y + 12, 0xFF6F7F94);
+        endY = y + 30;
     }
 
     private static int step(int cur, int dir) {
@@ -389,6 +427,7 @@ public final class MenuScreen extends Screen {
 
         int i = 1;
         List<Config802.Profile> list = new ArrayList<>(Client802.CONFIG.profiles);
+        endY = y + ((list.size() + 3) / 3) * (ch + gap);
         for (Config802.Profile p : list) {
             int cx = x1 + (i % 3) * (cw + gap);
             int cy = y + (i / 3) * (ch + gap);
@@ -461,7 +500,9 @@ public final class MenuScreen extends Screen {
         long handle = this.client.getWindow().getHandle();
         boolean down = GLFW.glfwGetMouseButton(handle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
         if (down && !wasDown) {
-            for (Hit h : hits) {
+            for (int idx = 0; idx < hits.size(); idx++) {
+                Hit h = hits.get(idx);
+                if (idx >= contentStart && (my < clipTop || my >= clipBottom)) continue;
                 if (h.contains(mx, my)) {
                     h.press().accept(mx);
                     dragging = h;
@@ -477,6 +518,15 @@ public final class MenuScreen extends Screen {
             MarlowCrystal.get().saveSettings();
         }
         wasDown = down;
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        if (maxScroll > 0) {
+            scroll = Math.max(0, Math.min(maxScroll, scroll - (int) Math.round(verticalAmount * 24)));
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
     }
 
     @Override
